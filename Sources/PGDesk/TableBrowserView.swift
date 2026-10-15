@@ -18,6 +18,8 @@ struct TableBrowserView: View {
     @State private var request = PageRequest()
     @State private var loading = false
     @State private var error: String?
+    @State private var editError: String?
+    @State private var saving = 0
     @State private var reloadToken = 0
 
     private static let pageSizes = [100, 500, 1000]
@@ -39,6 +41,14 @@ struct TableBrowserView: View {
                     ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
+            }
+            ToolbarItem {
+                Button("Export CSV", systemImage: "square.and.arrow.up") {
+                    guard let result else { return }
+                    CSVExport.save(columns: result.columns, rows: result.rows, suggestedName: relation.name)
+                }
+                .disabled(result == nil || mode != .data)
+                .help("Save the rows on this page as CSV")
             }
             ToolbarItem {
                 Button("Refresh", systemImage: "arrow.clockwise") { reloadToken += 1 }
@@ -65,6 +75,9 @@ struct TableBrowserView: View {
                     .padding()
             }
         } else if let result {
+            if let editError {
+                editErrorBanner(editError)
+            }
             ResultGrid(
                 columns: result.columns,
                 rows: result.rows,
@@ -73,7 +86,8 @@ struct TableBrowserView: View {
                     request.orderBy = sort.column
                     request.ascending = sort.ascending
                     request.offset = 0
-                }
+                },
+                onEdit: isEditable ? save : nil
             )
         } else {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -82,12 +96,65 @@ struct TableBrowserView: View {
         pager
     }
 
+    private func editErrorBanner(_ message: String) -> some View {
+        HStack(alignment: .top) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+            Text(message)
+                .font(.callout.monospaced())
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Dismiss", systemImage: "xmark") { editError = nil }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.red.opacity(0.12))
+    }
+
+    /// Cells can be edited in tables with a primary key, when the grid shows exactly the table's columns.
+    private var isEditable: Bool {
+        RowEditing.isEditable(relation, columns: columns) && result?.columns == columns.map(\.name)
+    }
+
+    private func save(_ edit: ResultGrid.Edit) {
+        let column = columns[edit.column].name
+        saving += 1
+        Task {
+            defer { saving -= 1 }
+            do {
+                let session = try await workspace.session(for: database)
+                let updated = try await session.updateCell(
+                    of: relation, columns: columns, row: edit.original, column: column, value: edit.value
+                )
+                // The page may have changed while saving; find the row again by its primary key.
+                let keys = columns.indices.filter { columns[$0].isPrimaryKey }
+                let sameRow = { (row: [String?]) in keys.allSatisfy { row[$0] == edit.original[$0] } }
+                if let rows = result?.rows {
+                    let index = edit.row < rows.count && sameRow(rows[edit.row])
+                        ? edit.row
+                        : rows.firstIndex(where: sameRow)
+                    if let index { result?.rows[index] = updated }
+                }
+                editError = nil
+            } catch {
+                editError = "Couldn't update \(column): \(error.localizedDescription)"
+            }
+        }
+    }
+
     private var pager: some View {
         HStack(spacing: 12) {
             Text(rangeText)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-            if loading { ProgressView().controlSize(.small) }
+            if loading || saving > 0 { ProgressView().controlSize(.small) }
+            if !isEditable && result != nil && !columns.isEmpty {
+                Label("Read-only", systemImage: "lock")
+                    .foregroundStyle(.secondary)
+                    .help(readOnlyReason)
+            }
             Spacer()
             if request.orderBy != nil {
                 Button("Clear Sort") {
@@ -116,6 +183,12 @@ struct TableBrowserView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+
+    private var readOnlyReason: String {
+        if relation.kind != .table && relation.kind != .partitioned { return "Only tables can be edited." }
+        if relation.isSystem { return "System catalogs are read-only here." }
+        return "Tables without a primary key are read-only: rows can't be identified safely."
     }
 
     private var rangeText: String {
@@ -149,6 +222,7 @@ struct TableBrowserView: View {
             }
             result = try await session.page(of: relation, columns: columns, request: request)
             error = nil
+            editError = nil
         } catch is CancellationError {
         } catch {
             self.error = error.localizedDescription

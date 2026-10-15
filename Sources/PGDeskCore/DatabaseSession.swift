@@ -16,7 +16,12 @@ public struct QueryResult: Sendable {
 
 public struct PGDeskError: LocalizedError, Sendable {
     public let message: String
+    /// The server's SQLSTATE code, when the error came from the server.
+    public var sqlState: String?
     public var errorDescription: String? { message }
+
+    /// True when the server stopped the statement because of a cancel request (SQLSTATE 57014).
+    public var isQueryCancelled: Bool { sqlState == "57014" }
 
     /// Pulls the server's message, detail and hint out of PostgresNIO errors,
     /// whose default description hides them.
@@ -25,6 +30,7 @@ public struct PGDeskError: LocalizedError, Sendable {
             self = error
         } else if let psql = error as? PSQLError {
             if let info = psql.serverInfo, let message = info[.message] {
+                self.sqlState = info[.sqlState]
                 self.message = Self.format(
                     severity: info[.severity], message: message,
                     detail: info[.detail], hint: info[.hint], position: info[.position]
@@ -36,6 +42,7 @@ public struct PGDeskError: LocalizedError, Sendable {
             }
         } else if case .server(let server)? = error as? PostgresError, let message = server.fields[.message] {
             // The EventLoopFuture-based query API converts PSQLError into this legacy type.
+            self.sqlState = server.fields[.sqlState]
             self.message = Self.format(
                 severity: server.fields[.severity], message: message,
                 detail: server.fields[.detail], hint: server.fields[.hint], position: server.fields[.position]
@@ -63,17 +70,37 @@ public final class DatabaseSession: Sendable {
     public let config: ConnectionConfig
     let connection: PostgresConnection
     let logger: Logger
+    /// The server process serving this connection, used to cancel its running statement.
+    public let backendPID: Int32
+    /// Kept so `cancelRunningQuery()` can open a side connection.
+    private let password: String?
 
     private static let nextID = NIOLockedValueBox(0)
 
-    init(config: ConnectionConfig, connection: PostgresConnection, logger: Logger) {
+    init(config: ConnectionConfig, connection: PostgresConnection, logger: Logger, backendPID: Int32, password: String?) {
         self.config = config
         self.connection = connection
         self.logger = logger
+        self.backendPID = backendPID
+        self.password = password
     }
 
     public static func connect(_ config: ConnectionConfig, password: String?) async throws -> DatabaseSession {
         let logger = Logger(label: "pgdesk")
+        let connection = try await openConnection(config, password: password, logger: logger)
+        do {
+            var pid: Int32 = 0
+            for try await value in try await connection.query("select pg_backend_pid()", logger: logger).decode(Int32.self) {
+                pid = value
+            }
+            return DatabaseSession(config: config, connection: connection, logger: logger, backendPID: pid, password: password)
+        } catch {
+            try? await connection.close()
+            throw PGDeskError(error)
+        }
+    }
+
+    private static func openConnection(_ config: ConnectionConfig, password: String?, logger: Logger) async throws -> PostgresConnection {
         do {
             let tls: PostgresConnection.Configuration.TLS
             switch config.sslMode {
@@ -99,8 +126,7 @@ public final class DatabaseSession: Sendable {
                 tls: tls
             )
             let id = nextID.withLockedValue { $0 += 1; return $0 }
-            let connection = try await PostgresConnection.connect(configuration: configuration, id: id, logger: logger)
-            return DatabaseSession(config: config, connection: connection, logger: logger)
+            return try await PostgresConnection.connect(configuration: configuration, id: id, logger: logger)
         } catch {
             throw PGDeskError(error)
         }
@@ -108,6 +134,28 @@ public final class DatabaseSession: Sendable {
 
     public func close() async {
         try? await connection.close()
+    }
+
+    /// Asks the server to cancel whatever statement this session is running.
+    /// PostgresNIO has no public CancelRequest (cancelling a Swift task only stops reading rows,
+    /// the server keeps going), so this opens a short-lived second connection and calls
+    /// `pg_cancel_backend`. The cancelled query then fails with SQLSTATE 57014.
+    /// Returns whether the server accepted the cancel signal; an idle session ignores it.
+    @discardableResult
+    public func cancelRunningQuery() async throws -> Bool {
+        let side = try await Self.openConnection(config, password: password, logger: logger)
+        do {
+            var cancelled = false
+            let rows = try await side.query("select pg_cancel_backend(\(backendPID))", logger: logger)
+            for try await value in rows.decode(Bool.self) {
+                cancelled = value
+            }
+            try? await side.close()
+            return cancelled
+        } catch {
+            try? await side.close()
+            throw PGDeskError(error)
+        }
     }
 
     /// Runs one SQL statement and returns its rows as display strings.
