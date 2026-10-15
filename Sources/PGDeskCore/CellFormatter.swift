@@ -51,9 +51,19 @@ enum CellFormatter {
         case .numeric:
             return try formatNumeric(cell)
         case .timestamp, .timestamptz:
-            return timestampFormatter.string(from: try cell.decode(Date.self))
+            // Postgres encodes ±infinity as Int64.max / Int64.min microseconds.
+            switch cell.bytes?.getInteger(at: cell.bytes!.readerIndex, as: Int64.self) {
+            case Int64.max: return "infinity"
+            case Int64.min: return "-infinity"
+            default: return timestampFormatter.string(from: try cell.decode(Date.self))
+            }
         case .date:
-            return dateFormatter.string(from: try cell.decode(Date.self))
+            // ±infinity dates are Int32.max / Int32.min days.
+            switch cell.bytes?.getInteger(at: cell.bytes!.readerIndex, as: Int32.self) {
+            case Int32.max: return "infinity"
+            case Int32.min: return "-infinity"
+            default: return dateFormatter.string(from: try cell.decode(Date.self))
+            }
         case .uuid:
             return try cell.decode(UUID.self).uuidString.lowercased()
         case .bytea:
@@ -133,20 +143,24 @@ enum CellFormatter {
               let months = bytes.readInteger(as: Int32.self) else {
             throw PostgresDecodingError.Code.failure
         }
+        // Postgres 17+ encodes ±infinity with every field at its max / min.
+        if micros == .max && days == .max && months == .max { return "infinity" }
+        if micros == .min && days == .min && months == .min { return "-infinity" }
         var parts: [String] = []
         func unit(_ value: Int32, _ name: String) {
-            if value != 0 { parts.append("\(value) \(name)\(abs(value) == 1 ? "" : "s")") }
+            if value != 0 { parts.append("\(value) \(name)\(value.magnitude == 1 ? "" : "s")") }
         }
         unit(months / 12, "year")
         unit(months % 12, "mon")
         unit(days, "day")
         if micros != 0 || parts.isEmpty {
             let sign = micros < 0 ? "-" : ""
-            let total = abs(micros)
+            // magnitude, not abs(): abs(Int64.min) traps.
+            let total = micros.magnitude
             let seconds = total / 1_000_000, fraction = total % 1_000_000
-            var time = String(format: "%@%02lld:%02lld:%02lld", sign, seconds / 3600, seconds / 60 % 60, seconds % 60)
+            var time = String(format: "%@%02llu:%02llu:%02llu", sign, seconds / 3600, seconds / 60 % 60, seconds % 60)
             if fraction != 0 {
-                time += String(format: ".%06lld", fraction).replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
+                time += String(format: ".%06llu", fraction).replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
             }
             parts.append(time)
         }

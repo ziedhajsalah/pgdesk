@@ -23,9 +23,11 @@ final class PGDeskCoreTests: XCTestCase {
                    array['x','y'] as ta, array[1,2]::int4[] as ia, null::text as nul, '1 day'::interval as iv,
                    '1 year 2 mons 3 days 04:05:06.5'::interval as iv2, '1.2.3.4'::inet as ip,
                    10::numeric(10,2) as n2, -0.000123::numeric as n3, 123456789012345678901234567890.5::numeric as n4,
-                   'NaN'::numeric as n5, 0::numeric as n6
+                   'NaN'::numeric as n5, 0::numeric as n6,
+                   'infinity'::interval as ivp, '-infinity'::interval as ivn, '-5 hours -3 minutes'::interval as ivneg,
+                   'infinity'::timestamptz as tsp, '-infinity'::timestamp as tsn, 'infinity'::date as dp, '-infinity'::date as dn
             """)
-        XCTAssertEqual(result.columns.count, 27)
+        XCTAssertEqual(result.columns.count, 34)
         let row = Dictionary(uniqueKeysWithValues: zip(result.columns, result.rows[0]))
         XCTAssertEqual(row["b"], "true")
         XCTAssertEqual(row["i2"], "42")
@@ -40,6 +42,13 @@ final class PGDeskCoreTests: XCTestCase {
         XCTAssertEqual(row["n4"], "123456789012345678901234567890.5")
         XCTAssertEqual(row["n5"], "NaN")
         XCTAssertEqual(row["n6"], "0")
+        XCTAssertEqual(row["ivp"], "infinity")
+        XCTAssertEqual(row["ivn"], "-infinity")
+        XCTAssertEqual(row["ivneg"], "-05:03:00")
+        XCTAssertEqual(row["tsp"], "infinity")
+        XCTAssertEqual(row["tsn"], "-infinity")
+        XCTAssertEqual(row["dp"], "infinity")
+        XCTAssertEqual(row["dn"], "-infinity")
         XCTAssertEqual(row["t"], "hi")
         XCTAssertEqual(row["vc"], "v")
         XCTAssertEqual(row["u"], "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")

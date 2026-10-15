@@ -58,6 +58,7 @@ struct ConnectionsView: View {
                 Picker("SSL", selection: $draft.sslMode) {
                     ForEach(SSLMode.allCases) { Text($0.rawValue).tag($0) }
                 }
+                .help("prefer and require encrypt but don't verify the server certificate. Use verify-full for remote servers.")
             }
             if let error {
                 Section {

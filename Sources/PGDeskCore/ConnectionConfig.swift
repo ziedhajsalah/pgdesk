@@ -1,7 +1,10 @@
 import Foundation
 
+/// Mirrors libpq's sslmode. `prefer` and `require` encrypt without checking the certificate;
+/// only `verifyFull` protects against a man-in-the-middle, so use it for remote servers.
 public enum SSLMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case disable, prefer, require
+    case verifyFull = "verify-full"
     public var id: String { rawValue }
 }
 

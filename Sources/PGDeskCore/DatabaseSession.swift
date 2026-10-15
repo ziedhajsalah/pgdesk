@@ -85,6 +85,10 @@ public final class DatabaseSession: Sendable {
                 tlsConfig.certificateVerification = .none
                 let context = try NIOSSLContext(configuration: tlsConfig)
                 tls = config.sslMode == .prefer ? .prefer(context) : .require(context)
+            case .verifyFull:
+                // Default client config checks the chain against system roots and the hostname.
+                let context = try NIOSSLContext(configuration: .makeClientConfiguration())
+                tls = .require(context)
             }
             let configuration = PostgresConnection.Configuration(
                 host: config.host,
